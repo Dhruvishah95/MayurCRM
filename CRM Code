@@ -1,0 +1,1035 @@
+// File: app.js
+// Main application file for the CRM system
+
+const express = require('express');
+const mongoose = require('mongoose');
+const bodyParser = require('body-parser');
+const session = require('express-session');
+const passport = require('passport');
+const LocalStrategy = require('passport-local').Strategy;
+const bcrypt = require('bcrypt');
+const path = require('path');
+const cors = require('cors');
+const dotenv = require('dotenv');
+
+// Routes imports
+const authRoutes = require('./routes/auth');
+const leadRoutes = require('./routes/leads');
+const campaignRoutes = require('./routes/campaigns');
+const whatsappRoutes = require('./routes/whatsapp');
+const emailRoutes = require('./routes/email');
+const socialMediaRoutes = require('./routes/socialMedia');
+const dashboardRoutes = require('./routes/dashboard');
+
+// Load environment variables
+dotenv.config();
+
+// Initialize Express app
+const app = express();
+
+// Connect to MongoDB
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+.then(() => console.log('MongoDB connected'))
+.catch(err => console.error('MongoDB connection error:', err));
+
+// Middleware
+app.use(cors());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { secure: process.env.NODE_ENV === 'production' }
+}));
+
+// Passport middleware
+app.use(passport.initialize());
+app.use(passport.session());
+
+// Set view engine
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+
+// Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/leads', leadRoutes);
+app.use('/api/campaigns', campaignRoutes);
+app.use('/api/whatsapp', whatsappRoutes);
+app.use('/api/email', emailRoutes);
+app.use('/api/social', socialMediaRoutes);
+app.use('/dashboard', dashboardRoutes);
+
+// Home route
+app.get('/', (req, res) => {
+  res.render('index');
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).send('Something broke!');
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+// File: models/User.js
+// User model for authentication and user management
+
+const mongoose = require('mongoose');
+const bcrypt = require('bcrypt');
+
+const userSchema = new mongoose.Schema({
+  username: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  password: {
+    type: String,
+    required: true
+  },
+  role: {
+    type: String,
+    enum: ['admin', 'salesManager', 'salesAgent'],
+    default: 'salesAgent'
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+// Password hashing middleware
+userSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  
+  try {
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Password verification method
+userSchema.methods.verifyPassword = async function(candidatePassword) {
+  return await bcrypt.compare(candidatePassword, this.password);
+};
+
+module.exports = mongoose.model('User', userSchema);
+
+// File: models/Lead.js
+// Lead model for storing customer/lead information
+
+const mongoose = require('mongoose');
+
+const leadSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true
+  },
+  email: {
+    type: String,
+    required: true
+  },
+  phone: {
+    type: String,
+    required: true
+  },
+  whatsappNumber: {
+    type: String
+  },
+  source: {
+    type: String,
+    enum: ['website', 'whatsapp', 'email', 'social', 'referral', 'other'],
+    default: 'other'
+  },
+  status: {
+    type: String,
+    enum: ['new', 'contacted', 'qualified', 'proposal', 'negotiation', 'won', 'lost'],
+    default: 'new'
+  },
+  assignedTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  notes: [
+    {
+      content: String,
+      createdBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+      },
+      createdAt: {
+        type: Date,
+        default: Date.now
+      }
+    }
+  ],
+  interactions: [
+    {
+      type: {
+        type: String,
+        enum: ['whatsapp', 'email', 'call', 'meeting', 'social', 'other']
+      },
+      content: String,
+      direction: {
+        type: String,
+        enum: ['inbound', 'outbound']
+      },
+      createdAt: {
+        type: Date,
+        default: Date.now
+      }
+    }
+  ],
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+leadSchema.pre('save', function(next) {
+  this.updatedAt = Date.now();
+  next();
+});
+
+module.exports = mongoose.model('Lead', leadSchema);
+
+// File: models/Campaign.js
+// Campaign model for marketing campaigns
+
+const mongoose = require('mongoose');
+
+const campaignSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true
+  },
+  type: {
+    type: String,
+    enum: ['whatsapp', 'email', 'social'],
+    required: true
+  },
+  status: {
+    type: String,
+    enum: ['draft', 'scheduled', 'active', 'completed', 'paused'],
+    default: 'draft'
+  },
+  content: {
+    subject: String, // For email campaigns
+    body: {
+      type: String,
+      required: true
+    },
+    mediaUrl: String // For whatsapp and social media attachments
+  },
+  schedule: {
+    startDate: Date,
+    endDate: Date,
+    frequency: {
+      type: String,
+      enum: ['once', 'daily', 'weekly', 'monthly']
+    }
+  },
+  audience: {
+    targetLeads: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Lead'
+    }],
+    criteria: {
+      status: [String],
+      source: [String],
+      customFields: Object
+    }
+  },
+  metrics: {
+    sent: {
+      type: Number,
+      default: 0
+    },
+    delivered: {
+      type: Number,
+      default: 0
+    },
+    opened: {
+      type: Number,
+      default: 0
+    },
+    clicked: {
+      type: Number,
+      default: 0
+    },
+    responded: {
+      type: Number,
+      default: 0
+    }
+  },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+campaignSchema.pre('save', function(next) {
+  this.updatedAt = Date.now();
+  next();
+});
+
+module.exports = mongoose.model('Campaign', campaignSchema);
+
+// File: routes/whatsapp.js
+// WhatsApp integration routes
+
+const express = require('express');
+const router = express.Router();
+const axios = require('axios');
+const Lead = require('../models/Lead');
+const Campaign = require('../models/Campaign');
+const User = require('../models/User');
+const auth = require('../middleware/auth');
+
+// WhatsApp webhook for receiving messages
+router.post('/webhook', async (req, res) => {
+  try {
+    const { from, to, type, message_id, timestamp, text } = req.body;
+    
+    // Look for existing lead with this phone number
+    let lead = await Lead.findOne({ whatsappNumber: from });
+    
+    // Create new lead if not found
+    if (!lead) {
+      lead = new Lead({
+        name: `Unknown (${from})`,
+        email: `unknown_${from}@pending.com`,
+        phone: from,
+        whatsappNumber: from,
+        source: 'whatsapp',
+        status: 'new'
+      });
+      await lead.save();
+    }
+    
+    // Record the interaction
+    lead.interactions.push({
+      type: 'whatsapp',
+      content: text.body,
+      direction: 'inbound',
+      createdAt: new Date(timestamp * 1000)
+    });
+    
+    await lead.save();
+    
+    // Return 200 to acknowledge receipt of message
+    res.status(200).send('OK');
+  } catch (err) {
+    console.error('WhatsApp webhook error:', err);
+    res.status(500).json({ error: 'Failed to process WhatsApp message' });
+  }
+});
+
+// Send WhatsApp message to a lead
+router.post('/send', auth, async (req, res) => {
+  try {
+    const { leadId, message, mediaUrl } = req.body;
+    
+    const lead = await Lead.findById(leadId);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    
+    // Send message via WhatsApp API
+    const response = await axios.post(process.env.WHATSAPP_API_URL, {
+      to: lead.whatsappNumber,
+      type: mediaUrl ? 'media' : 'text',
+      text: { body: message },
+      media: mediaUrl ? { url: mediaUrl } : undefined
+    }, {
+      headers: {
+        'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    // Record interaction
+    lead.interactions.push({
+      type: 'whatsapp',
+      content: message,
+      direction: 'outbound'
+    });
+    
+    await lead.save();
+    
+    res.status(200).json({ success: true, messageId: response.data.messages[0].id });
+  } catch (err) {
+    console.error('Send WhatsApp message error:', err);
+    res.status(500).json({ error: 'Failed to send WhatsApp message' });
+  }
+});
+
+// Send WhatsApp campaign
+router.post('/campaign/:campaignId/send', auth, async (req, res) => {
+  try {
+    const campaign = await Campaign.findById(req.params.campaignId);
+    
+    if (!campaign || campaign.type !== 'whatsapp') {
+      return res.status(404).json({ error: 'WhatsApp campaign not found' });
+    }
+    
+    // Get target leads
+    const leads = await Lead.find({
+      _id: { $in: campaign.audience.targetLeads }
+    });
+    
+    // Send messages
+    const results = [];
+    for (const lead of leads) {
+      if (!lead.whatsappNumber) continue;
+      
+      try {
+        // Send the message
+        const response = await axios.post(process.env.WHATSAPP_API_URL, {
+          to: lead.whatsappNumber,
+          type: campaign.content.mediaUrl ? 'media' : 'text',
+          text: { body: campaign.content.body },
+          media: campaign.content.mediaUrl ? { url: campaign.content.mediaUrl } : undefined
+        }, {
+          headers: {
+            'Authorization': `Bearer ${process.env.WHATSAPP_API_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        // Record interaction
+        lead.interactions.push({
+          type: 'whatsapp',
+          content: campaign.content.body,
+          direction: 'outbound'
+        });
+        
+        await lead.save();
+        
+        results.push({
+          lead: lead._id,
+          success: true,
+          messageId: response.data.messages[0].id
+        });
+        
+        // Update campaign metrics
+        campaign.metrics.sent += 1;
+      } catch (err) {
+        results.push({
+          lead: lead._id,
+          success: false,
+          error: err.message
+        });
+      }
+    }
+    
+    // Update campaign status
+    campaign.status = 'completed';
+    await campaign.save();
+    
+    res.status(200).json({ 
+      success: true, 
+      total: leads.length,
+      sent: results.filter(r => r.success).length,
+      failed: results.filter(r => !r.success).length,
+      results
+    });
+  } catch (err) {
+    console.error('WhatsApp campaign error:', err);
+    res.status(500).json({ error: 'Failed to send WhatsApp campaign' });
+  }
+});
+
+// Assign lead to sales agent
+router.post('/lead/:leadId/assign', auth, async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    // Validate user exists and is a sales agent
+    const user = await User.findById(userId);
+    if (!user || user.role !== 'salesAgent') {
+      return res.status(400).json({ error: 'Invalid sales agent' });
+    }
+    
+    // Update lead assignment
+    const lead = await Lead.findByIdAndUpdate(
+      req.params.leadId,
+      { assignedTo: userId },
+      { new: true }
+    );
+    
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    
+    res.status(200).json({ success: true, lead });
+  } catch (err) {
+    console.error('Lead assignment error:', err);
+    res.status(500).json({ error: 'Failed to assign lead' });
+  }
+});
+
+module.exports = router;
+
+// File: routes/email.js
+// Email marketing routes
+
+const express = require('express');
+const router = express.Router();
+const nodemailer = require('nodemailer');
+const Lead = require('../models/Lead');
+const Campaign = require('../models/Campaign');
+const auth = require('../middleware/auth');
+
+// Configure email transporter
+const transporter = nodemailer.createTransport({
+  host: process.env.EMAIL_HOST,
+  port: process.env.EMAIL_PORT,
+  secure: process.env.EMAIL_SECURE === 'true',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASSWORD
+  }
+});
+
+// Send email to a lead
+router.post('/send', auth, async (req, res) => {
+  try {
+    const { leadId, subject, message, attachments } = req.body;
+    
+    const lead = await Lead.findById(leadId);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    
+    // Send email
+    const mailOptions = {
+      from: process.env.EMAIL_FROM,
+      to: lead.email,
+      subject,
+      html: message,
+      attachments: attachments || []
+    };
+    
+    const info = await transporter.sendMail(mailOptions);
+    
+    // Record interaction
+    lead.interactions.push({
+      type: 'email',
+      content: `Subject: ${subject}\n\n${message}`,
+      direction: 'outbound'
+    });
+    
+    await lead.save();
+    
+    res.status(200).json({ success: true, messageId: info.messageId });
+  } catch (err) {
+    console.error('Send email error:', err);
+    res.status(500).json({ error: 'Failed to send email' });
+  }
+});
+
+// Send email campaign
+router.post('/campaign/:campaignId/send', auth, async (req, res) => {
+  try {
+    const campaign = await Campaign.findById(req.params.campaignId);
+    
+    if (!campaign || campaign.type !== 'email') {
+      return res.status(404).json({ error: 'Email campaign not found' });
+    }
+    
+    // Get target leads
+    const leads = await Lead.find({
+      _id: { $in: campaign.audience.targetLeads }
+    });
+    
+    // Send emails
+    const results = [];
+    for (const lead of leads) {
+      if (!lead.email) continue;
+      
+      try {
+        const mailOptions = {
+          from: process.env.EMAIL_FROM,
+          to: lead.email,
+          subject: campaign.content.subject,
+          html: campaign.content.body,
+          attachments: campaign.content.mediaUrl ? [{
+            filename: 'attachment',
+            path: campaign.content.mediaUrl
+          }] : []
+        };
+        
+        const info = await transporter.sendMail(mailOptions);
+        
+        // Record interaction
+        lead.interactions.push({
+          type: 'email',
+          content: `Subject: ${campaign.content.subject}\n\n${campaign.content.body}`,
+          direction: 'outbound'
+        });
+        
+        await lead.save();
+        
+        results.push({
+          lead: lead._id,
+          success: true,
+          messageId: info.messageId
+        });
+        
+        // Update campaign metrics
+        campaign.metrics.sent += 1;
+      } catch (err) {
+        results.push({
+          lead: lead._id,
+          success: false,
+          error: err.message
+        });
+      }
+    }
+    
+    // Update campaign status
+    campaign.status = 'completed';
+    await campaign.save();
+    
+    res.status(200).json({ 
+      success: true, 
+      total: leads.length,
+      sent: results.filter(r => r.success).length,
+      failed: results.filter(r => !r.success).length,
+      results
+    });
+  } catch (err) {
+    console.error('Email campaign error:', err);
+    res.status(500).json({ error: 'Failed to send email campaign' });
+  }
+});
+
+module.exports = router;
+
+// File: routes/socialMedia.js
+// Social media marketing routes
+
+const express = require('express');
+const router = express.Router();
+const axios = require('axios');
+const Lead = require('../models/Lead');
+const Campaign = require('../models/Campaign');
+const auth = require('../middleware/auth');
+
+// Configure social media APIs
+const socialApiConfig = {
+  facebook: {
+    apiUrl: process.env.FACEBOOK_API_URL,
+    token: process.env.FACEBOOK_API_TOKEN
+  },
+  instagram: {
+    apiUrl: process.env.INSTAGRAM_API_URL,
+    token: process.env.INSTAGRAM_API_TOKEN
+  },
+  twitter: {
+    apiUrl: process.env.TWITTER_API_URL,
+    token: process.env.TWITTER_API_TOKEN
+  }
+};
+
+// Send social media message to a lead
+router.post('/send', auth, async (req, res) => {
+  try {
+    const { leadId, platform, message, mediaUrl } = req.body;
+    
+    const lead = await Lead.findById(leadId);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    
+    // Validate platform
+    if (!socialApiConfig[platform]) {
+      return res.status(400).json({ error: 'Unsupported social media platform' });
+    }
+    
+    // Send message via social media API
+    const response = await axios.post(socialApiConfig[platform].apiUrl, {
+      recipientId: lead.socialAccounts?.[platform],
+      message,
+      mediaUrl
+    }, {
+      headers: {
+        'Authorization': `Bearer ${socialApiConfig[platform].token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    // Record interaction
+    lead.interactions.push({
+      type: 'social',
+      content: `[${platform}] ${message}`,
+      direction: 'outbound'
+    });
+    
+    await lead.save();
+    
+    res.status(200).json({ success: true, messageId: response.data.id });
+  } catch (err) {
+    console.error('Send social media message error:', err);
+    res.status(500).json({ error: 'Failed to send social media message' });
+  }
+});
+
+// Send social media campaign
+router.post('/campaign/:campaignId/send', auth, async (req, res) => {
+  try {
+    const { platform } = req.body;
+    
+    const campaign = await Campaign.findById(req.params.campaignId);
+    
+    if (!campaign || campaign.type !== 'social') {
+      return res.status(404).json({ error: 'Social media campaign not found' });
+    }
+    
+    // Validate platform
+    if (!socialApiConfig[platform]) {
+      return res.status(400).json({ error: 'Unsupported social media platform' });
+    }
+    
+    // Post to social media platform
+    const response = await axios.post(`${socialApiConfig[platform].apiUrl}/publish`, {
+      content: campaign.content.body,
+      mediaUrl: campaign.content.mediaUrl
+    }, {
+      headers: {
+        'Authorization': `Bearer ${socialApiConfig[platform].token}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    // Update campaign metrics and status
+    campaign.metrics.sent = 1;
+    campaign.metrics.delivered = 1;
+    campaign.status = 'completed';
+    await campaign.save();
+    
+    res.status(200).json({ 
+      success: true,
+      postId: response.data.id,
+      url: response.data.url
+    });
+  } catch (err) {
+    console.error('Social media campaign error:', err);
+    res.status(500).json({ error: 'Failed to send social media campaign' });
+  }
+});
+
+module.exports = router;
+
+// File: routes/leads.js
+// Lead management routes
+
+const express = require('express');
+const router = express.Router();
+const Lead = require('../models/Lead');
+const User = require('../models/User');
+const auth = require('../middleware/auth');
+
+// Get all leads
+router.get('/', auth, async (req, res) => {
+  try {
+    const { status, source, assignedTo, search } = req.query;
+    
+    // Build query
+    const query = {};
+    
+    if (status) query.status = status;
+    if (source) query.source = source;
+    if (assignedTo) query.assignedTo = assignedTo;
+    
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } }
+      ];
+    }
+    
+    // Get leads
+    const leads = await Lead.find(query)
+      .populate('assignedTo', 'username email')
+      .sort({ createdAt: -1 });
+    
+    res.status(200).json(leads);
+  } catch (err) {
+    console.error('Get leads error:', err);
+    res.status(500).json({ error: 'Failed to fetch leads' });
+  }
+});
+
+// Get lead by ID
+router.get('/:id', auth, async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id)
+      .populate('assignedTo', 'username email')
+      .populate('notes.createdBy', 'username email');
+    
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    
+    res.status(200).json(lead);
+  } catch (err) {
+    console.error('Get lead error:', err);
+    res.status(500).json({ error: 'Failed to fetch lead' });
+  }
+});
+
+// Create new lead
+router.post('/', auth, async (req, res) => {
+  try {
+    const { name, email, phone, whatsappNumber, source, status, assignedTo } = req.body;
+    
+    // Create lead
+    const lead = new Lead({
+      name,
+      email,
+      phone,
+      whatsappNumber: whatsappNumber || phone,
+      source,
+      status,
+      assignedTo
+    });
+    
+    await lead.save();
+    
+    res.status(201).json(lead);
+  } catch (err) {
+    console.error('Create lead error:', err);
+    res.status(500).json({ error: 'Failed to create lead' });
+  }
+});
+
+// Update lead
+router.put('/:id', auth, async (req, res) => {
+  try {
+    const { name, email, phone, whatsappNumber, source, status, assignedTo } = req.body;
+    
+    const lead = await Lead.findByIdAndUpdate(
+      req.params.id,
+      {
+        name,
+        email,
+        phone,
+        whatsappNumber,
+        source,
+        status,
+        assignedTo,
+        updatedAt: Date.now()
+      },
+      { new: true }
+    ).populate('assignedTo', 'username email');
+    
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    
+    res.status(200).json(lead);
+  } catch (err) {
+    console.error('Update lead error:', err);
+    res.status(500).json({ error: 'Failed to update lead' });
+  }
+});
+
+// Add note to lead
+router.post('/:id/notes', auth, async (req, res) => {
+  try {
+    const { content } = req.body;
+    
+    const lead = await Lead.findById(req.params.id);
+    
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    
+    lead.notes.push({
+      content,
+      createdBy: req.user.id
+    });
+    
+    await lead.save();
+    
+    const updatedLead = await Lead.findById(req.params.id)
+      .populate('assignedTo', 'username email')
+      .populate('notes.createdBy', 'username email');
+    
+    res.status(200).json(updatedLead);
+  } catch (err) {
+    console.error('Add note error:', err);
+    res.status(500).json({ error: 'Failed to add note' });
+  }
+});
+
+// Delete lead
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const lead = await Lead.findByIdAndDelete(req.params.id);
+    
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error('Delete lead error:', err);
+    res.status(500).json({ error: 'Failed to delete lead' });
+  }
+});
+
+module.exports = router;
+
+// File: routes/campaigns.js
+// Campaign management routes
+
+const express = require('express');
+const router = express.Router();
+const Campaign = require('../models/Campaign');
+const Lead = require('../models/Lead');
+const auth = require('../middleware/auth');
+
+// Get all campaigns
+router.get('/', auth, async (req, res) => {
+  try {
+    const { type, status } = req.query;
+    
+    // Build query
+    const query = {};
+    
+    if (type) query.type = type;
+    if (status) query.status = status;
+    
+    const campaigns = await Campaign.find(query)
+      .populate('createdBy', 'username email')
+      .sort({ createdAt: -1 });
+    
+    res.status(200).json(campaigns);
+  } catch (err) {
+    console.error('Get campaigns error:', err);
+    res.status(500).json({ error: 'Failed to fetch campaigns' });
+  }
+});
+
+// Get campaign by ID
+router.get('/:id', auth, async (req, res) => {
+  try {
+    const campaign = await Campaign.findById(req.params.id)
+      .populate('createdBy', 'username email')
+      .populate('audience.targetLeads', 'name email phone');
+    
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+    
+    res.status(200).json(campaign);
+  } catch (err) {
+    console.error('Get campaign error:', err);
+    res.status(500).json({ error: 'Failed to fetch campaign' });
+  }
+});
+
+// Create new campaign
+router.post('/', auth, async (req, res) => {
+  try {
+    const { 
+      name, type, status, content, schedule, 
+      audience, audienceCriteria 
+    } = req.body;
+    
+    // If audience criteria is provided, find matching leads
+    let targetLeads = audience?.targetLeads || [];
+    
+    if (audienceCriteria) {
+      const query = {};
+      
+      if (audienceCriteria.status && audienceCriteria.status.length > 0) {
+        query.status = { $in: audienceCriteria.status };
+      }
+      
+      if (audienceCriteria.source && audienceCriteria.source.length > 0) {
+        query.source = { $in: audienceCriteria.source };
+      }
+      
+      const matchingLeads = await Lead.find(query).select('_id');
+      targetLeads = matchingLeads.map(lead => lead._id);
+    }
+    
+    // Create campaign
+    const campaign = new Campaign({
+      name,
+      type,
+      status: status || 'draft',
+      content,
+      schedule,
+      audience: {
+        targetLeads,
+        criteria: audienceCriteria || {}
+      },
+      createdBy: req.user.id
+    });
+    
+    await campaign.save();
+    
+    res.status(201).json(campaign);
+  } catch (err) {
+    console.error('Create campaign error:', err);
+    res.status(500).json({ error: 'Failed to create campaign' });
+  }
+});
+
+// Update campaign
+router.put('/:id', auth, async (req, res) => {
+  try {
+    const { 
+      name, type, status, content, schedule, 
+      audience, audienceCriteria 
+    } = req.body;
+    
+    // If audience criteria is provided, find matching leads
+    let targetLeads = audience?.targetLeads || [];
+    
+    if (audienceCriteria) {
+      const query = {};
+      
+      if (audienceCriteria.status && audienceCriteria.status.length > 0) {
+        query.status = { $in: audienceCriteria.status };
+      }
+      
+      if (audienceCriteria.source && audienceCriteria.source.length > 0) {
+        query.source = { $in: audienceCriteria.source };
